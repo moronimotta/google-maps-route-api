@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 
@@ -102,14 +103,17 @@ func main() {
 				})
 			}
 
+			// Simplify route: remove waypoints too close together (< 15m apart)
+			simplified := simplifyRoute(points, 15.0)
+
 			// Update IsDownHill for each point except the last
-			for j := 0; j < len(points)-1; j++ {
-				if points[j+1].Elevation < points[j].Elevation {
-					points[j].IsDownHill = true
+			for j := 0; j < len(simplified)-1; j++ {
+				if simplified[j+1].Elevation < simplified[j].Elevation {
+					simplified[j].IsDownHill = true
 				}
 			}
 
-			route.Points = points
+			route.Points = simplified
 			out.Routes = append(out.Routes, route)
 		}
 
@@ -171,4 +175,44 @@ func stripHTML(s string) string {
 		}
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// simplifyRoute removes waypoints that are too close together (< minDist meters)
+// Always keeps the first and last point
+func simplifyRoute(points []entities.Point, minDist float64) []entities.Point {
+	if len(points) <= 2 {
+		return points
+	}
+
+	simplified := []entities.Point{points[0]} // always keep first
+
+	for i := 1; i < len(points)-1; i++ {
+		last := simplified[len(simplified)-1]
+		curr := points[i]
+		dist := haversine(last.Lat, last.Lng, curr.Lat, curr.Lng)
+
+		// Keep this point if it's far enough from the last kept point
+		if dist >= minDist {
+			simplified = append(simplified, curr)
+		}
+	}
+
+	// Always keep last point
+	simplified = append(simplified, points[len(points)-1])
+	return simplified
+}
+
+// haversine returns distance in meters between two lat/lng points
+func haversine(lat1, lng1, lat2, lng2 float64) float64 {
+	const R = 6371000.0 // Earth radius in meters
+	lat1Rad := lat1 * 3.14159265359 / 180.0
+	lat2Rad := lat2 * 3.14159265359 / 180.0
+	dLat := (lat2 - lat1) * 3.14159265359 / 180.0
+	dLng := (lng2 - lng1) * 3.14159265359 / 180.0
+
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(dLng/2)*math.Sin(dLng/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return R * c
 }
