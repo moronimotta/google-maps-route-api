@@ -1,4 +1,4 @@
-module test-module-maps
+module bike-router
 
 go 1.24.2
 

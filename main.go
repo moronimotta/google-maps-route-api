@@ -1,14 +1,14 @@
 package main
 
 import (
+	"bike-router/entities"
+	"bike-router/utils"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
-	"test-module-maps/entities"
-	"test-module-maps/utils"
 
 	maps "googlemaps.github.io/maps"
 )
@@ -19,6 +19,8 @@ func main() {
 
 	client, err := maps.NewClient(maps.WithAPIKey(apiKey))
 	if err != nil {
+		message := utils.FormatErrorNotification(fmt.Errorf("maps.NewClient: %v", err), "Main")
+		utils.SendNotification(message)
 		log.Fatalf("maps.NewClient: %v", err)
 	}
 
@@ -32,6 +34,8 @@ func main() {
 		}
 		var req entities.RouteInput
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			message := utils.FormatErrorNotification(fmt.Errorf("invalid json: %v", err), "Route Handler")
+			utils.SendNotification(message)
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
@@ -45,6 +49,8 @@ func main() {
 
 		routesResp, _, err := client.Directions(context.Background(), dr)
 		if err != nil {
+			message := utils.FormatErrorNotification(fmt.Errorf("directions error: %v", err), "Route Handler")
+			utils.SendNotification(message)
 			http.Error(w, "directions error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
