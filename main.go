@@ -72,14 +72,14 @@ func main() {
 					lat := step.StartLocation.Lat
 					lng := step.StartLocation.Lng
 
-					// Try reverse geocode first
+					// Prefer clean street name from reverse geocode
 					desc := extractStreetNameFromReverseGeocode(client, lat, lng)
 					if desc == "" {
 						desc = stripHTML(step.HTMLInstructions)
 					}
 
-					// Skip repeated street names to avoid bouncing around
-					if desc == lastDesc {
+					// Skip repeated or empty street names
+					if desc == "" || desc == lastDesc {
 						continue
 					}
 					lastDesc = desc
@@ -98,10 +98,13 @@ func main() {
 					})
 				}
 
-				// Always add leg end point
+				// Add final leg point
 				endLat := leg.EndLocation.Lat
 				endLng := leg.EndLocation.Lng
 				endDesc := extractStreetNameFromReverseGeocode(client, endLat, endLng)
+				if endDesc == "" {
+					endDesc = "Destination"
+				}
 				elev, err := getElevation(client, endLat, endLng)
 				if err != nil {
 					elev = 0
@@ -115,13 +118,16 @@ func main() {
 				})
 			}
 
-			// Step 1: simplify small distance jumps (15m → 50m)
+			// Step 1: simplify close points (<50 m)
 			simplified := simplifyRoute(points, 50.0)
 
-			// Step 2: merge repeated street names in sequence
+			// Step 2: remove micro backtracks or “zig-zags”
+			simplified = removeZigZags(simplified, 30.0)
+
+			// Step 3: merge duplicates
 			simplified = mergeDuplicateDescriptions(simplified)
 
-			// Step 3: update downhill info
+			// Step 4: set downhill info
 			for j := 0; j < len(simplified)-1; j++ {
 				if simplified[j+1].Elevation < simplified[j].Elevation {
 					simplified[j].IsDownHill = true
@@ -160,6 +166,8 @@ func getElevation(client *maps.Client, lat, lng float64) (float64, error) {
 	return resp[0].Elevation, nil
 }
 
+// extractStreetNameFromReverseGeocode tries to get a clean street name
+// and ignores Plus Codes or generic placeholders.
 func extractStreetNameFromReverseGeocode(client *maps.Client, lat, lng float64) string {
 	resp, err := client.ReverseGeocode(context.Background(), &maps.GeocodingRequest{
 		LatLng: &maps.LatLng{Lat: lat, Lng: lng},
@@ -167,14 +175,24 @@ func extractStreetNameFromReverseGeocode(client *maps.Client, lat, lng float64) 
 	if err != nil || len(resp) == 0 {
 		return ""
 	}
+
 	for _, comp := range resp[0].AddressComponents {
 		for _, t := range comp.Types {
 			if t == "route" {
-				return comp.LongName
+				name := comp.LongName
+				if strings.Contains(name, "+") || strings.HasPrefix(name, "Unnamed") {
+					return ""
+				}
+				return name
 			}
 		}
 	}
-	return resp[0].FormattedAddress
+
+	formatted := resp[0].FormattedAddress
+	if strings.Contains(formatted, "+") || strings.Contains(formatted, "Unnamed") {
+		return ""
+	}
+	return formatted
 }
 
 func stripHTML(s string) string {
@@ -196,32 +214,53 @@ func stripHTML(s string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// simplifyRoute removes waypoints that are too close together (< minDist meters)
-// Always keeps the first and last point
+// simplifyRoute removes points that are too close together (< minDist meters)
 func simplifyRoute(points []entities.Point, minDist float64) []entities.Point {
 	if len(points) <= 2 {
 		return points
 	}
 
-	simplified := []entities.Point{points[0]} // always keep first
-
+	simplified := []entities.Point{points[0]} // keep first
 	for i := 1; i < len(points)-1; i++ {
 		last := simplified[len(simplified)-1]
 		curr := points[i]
 		dist := haversine(last.Lat, last.Lng, curr.Lat, curr.Lng)
-
-		// Keep this point if it's far enough from the last kept point
 		if dist >= minDist {
 			simplified = append(simplified, curr)
 		}
 	}
-
-	// Always keep last point
 	simplified = append(simplified, points[len(points)-1])
 	return simplified
 }
 
-// mergeDuplicateDescriptions collapses consecutive identical street names
+// removeZigZags removes small “back-and-forth” hops (<minBacktrack meters)
+func removeZigZags(points []entities.Point, minBacktrack float64) []entities.Point {
+	if len(points) < 3 {
+		return points
+	}
+
+	cleaned := []entities.Point{points[0]}
+	for i := 1; i < len(points)-1; i++ {
+		prev := cleaned[len(cleaned)-1]
+		curr := points[i]
+		next := points[i+1]
+
+		d1 := haversine(prev.Lat, prev.Lng, curr.Lat, curr.Lng)
+		d2 := haversine(curr.Lat, curr.Lng, next.Lat, next.Lng)
+		backtrack := haversine(prev.Lat, prev.Lng, next.Lat, next.Lng)
+
+		// If the segment doubles back, skip curr
+		if backtrack < d1 && backtrack < d2 && backtrack < minBacktrack {
+			continue
+		}
+		cleaned = append(cleaned, curr)
+	}
+
+	cleaned = append(cleaned, points[len(points)-1])
+	return cleaned
+}
+
+// mergeDuplicateDescriptions merges consecutive identical street names
 func mergeDuplicateDescriptions(points []entities.Point) []entities.Point {
 	if len(points) == 0 {
 		return points
