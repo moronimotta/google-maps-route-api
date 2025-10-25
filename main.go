@@ -65,14 +65,24 @@ func main() {
 		for i, rt := range routesResp {
 			route := entities.Route{ID: i + 1}
 			points := []entities.Point{}
+
 			for _, leg := range rt.Legs {
+				var lastDesc string
 				for _, step := range leg.Steps {
 					lat := step.StartLocation.Lat
 					lng := step.StartLocation.Lng
+
+					// Try reverse geocode first
 					desc := extractStreetNameFromReverseGeocode(client, lat, lng)
 					if desc == "" {
 						desc = stripHTML(step.HTMLInstructions)
 					}
+
+					// Skip repeated street names to avoid bouncing around
+					if desc == lastDesc {
+						continue
+					}
+					lastDesc = desc
 
 					elev, err := getElevation(client, lat, lng)
 					if err != nil {
@@ -84,9 +94,11 @@ func main() {
 						Lng:         lng,
 						Description: desc,
 						Elevation:   elev,
-						IsDownHill:  false, // default false; will update later
+						IsDownHill:  false,
 					})
 				}
+
+				// Always add leg end point
 				endLat := leg.EndLocation.Lat
 				endLng := leg.EndLocation.Lng
 				endDesc := extractStreetNameFromReverseGeocode(client, endLat, endLng)
@@ -99,14 +111,17 @@ func main() {
 					Lng:         endLng,
 					Description: endDesc,
 					Elevation:   elev,
-					IsDownHill:  false, // default false
+					IsDownHill:  false,
 				})
 			}
 
-			// Simplify route: remove waypoints too close together (< 15m apart)
-			simplified := simplifyRoute(points, 15.0)
+			// Step 1: simplify small distance jumps (15m → 50m)
+			simplified := simplifyRoute(points, 50.0)
 
-			// Update IsDownHill for each point except the last
+			// Step 2: merge repeated street names in sequence
+			simplified = mergeDuplicateDescriptions(simplified)
+
+			// Step 3: update downhill info
 			for j := 0; j < len(simplified)-1; j++ {
 				if simplified[j+1].Elevation < simplified[j].Elevation {
 					simplified[j].IsDownHill = true
@@ -129,6 +144,10 @@ func main() {
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
+
+// =======================
+// Utility Helper Functions
+// =======================
 
 // getElevation fetches elevation in meters for a given lat/lng
 func getElevation(client *maps.Client, lat, lng float64) (float64, error) {
@@ -202,13 +221,28 @@ func simplifyRoute(points []entities.Point, minDist float64) []entities.Point {
 	return simplified
 }
 
+// mergeDuplicateDescriptions collapses consecutive identical street names
+func mergeDuplicateDescriptions(points []entities.Point) []entities.Point {
+	if len(points) == 0 {
+		return points
+	}
+
+	merged := []entities.Point{points[0]}
+	for i := 1; i < len(points); i++ {
+		if points[i].Description != merged[len(merged)-1].Description {
+			merged = append(merged, points[i])
+		}
+	}
+	return merged
+}
+
 // haversine returns distance in meters between two lat/lng points
 func haversine(lat1, lng1, lat2, lng2 float64) float64 {
 	const R = 6371000.0 // Earth radius in meters
-	lat1Rad := lat1 * 3.14159265359 / 180.0
-	lat2Rad := lat2 * 3.14159265359 / 180.0
-	dLat := (lat2 - lat1) * 3.14159265359 / 180.0
-	dLng := (lng2 - lng1) * 3.14159265359 / 180.0
+	lat1Rad := lat1 * math.Pi / 180.0
+	lat2Rad := lat2 * math.Pi / 180.0
+	dLat := (lat2 - lat1) * math.Pi / 180.0
+	dLng := (lng2 - lng1) * math.Pi / 180.0
 
 	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
 		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
