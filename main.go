@@ -30,8 +30,8 @@ func main() {
 			utils.SendNotification(message)
 			http.Error(w, "only POST allowed", http.StatusMethodNotAllowed)
 			return
-
 		}
+
 		var req entities.RouteInput
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			message := utils.FormatErrorNotification(fmt.Errorf("invalid json: %v", err), "Route Handler")
@@ -44,7 +44,7 @@ func main() {
 		dr := &maps.DirectionsRequest{
 			Origin:      originStr,
 			Destination: req.Destination,
-			Mode:        maps.TravelModeBicycling, // BICYCLING MODE
+			Mode:        maps.TravelModeBicycling,
 		}
 
 		routesResp, _, err := client.Directions(context.Background(), dr)
@@ -54,6 +54,7 @@ func main() {
 			http.Error(w, "directions error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		if len(routesResp) == 0 {
 			http.Error(w, "no routes", http.StatusNotFound)
 			return
@@ -69,28 +70,71 @@ func main() {
 					lng := step.StartLocation.Lng
 					desc := extractStreetNameFromReverseGeocode(client, lat, lng)
 					if desc == "" {
-						// fallback to plain text instruction (strip simple HTML)
 						desc = stripHTML(step.HTMLInstructions)
 					}
-					points = append(points, entities.Point{Lat: lat, Lng: lng, Description: desc})
+
+					elev, err := getElevation(client, lat, lng)
+					if err != nil {
+						elev = 0
+					}
+
+					points = append(points, entities.Point{
+						Lat:         lat,
+						Lng:         lng,
+						Description: desc,
+						Elevation:   elev,
+						IsDownHill:  false, // default false; will update later
+					})
 				}
-				// include final end location of leg
 				endLat := leg.EndLocation.Lat
 				endLng := leg.EndLocation.Lng
 				endDesc := extractStreetNameFromReverseGeocode(client, endLat, endLng)
-				points = append(points, entities.Point{Lat: endLat, Lng: endLng, Description: endDesc})
+				elev, err := getElevation(client, endLat, endLng)
+				if err != nil {
+					elev = 0
+				}
+				points = append(points, entities.Point{
+					Lat:         endLat,
+					Lng:         endLng,
+					Description: endDesc,
+					Elevation:   elev,
+					IsDownHill:  false, // default false
+				})
 			}
+
+			// Update IsDownHill for each point except the last
+			for j := 0; j < len(points)-1; j++ {
+				if points[j+1].Elevation < points[j].Elevation {
+					points[j].IsDownHill = true
+				}
+			}
+
 			route.Points = points
 			out.Routes = append(out.Routes, route)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
-		message := utils.FormatInfoNotification(fmt.Sprintf("Route request processed: Origin=%s, Destination=%s, RoutesFound=%d", originStr, req.Destination, len(out.Routes)), "Route Handler")
+
+		message := utils.FormatInfoNotification(
+			fmt.Sprintf("Route request processed: Origin=%s, Destination=%s, RoutesFound=%d", originStr, req.Destination, len(out.Routes)),
+			"Route Handler",
+		)
 		utils.SendNotification(message)
 	})
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+// getElevation fetches elevation in meters for a given lat/lng
+func getElevation(client *maps.Client, lat, lng float64) (float64, error) {
+	resp, err := client.Elevation(context.Background(), &maps.ElevationRequest{
+		Locations: []maps.LatLng{{Lat: lat, Lng: lng}},
+	})
+	if err != nil || len(resp) == 0 {
+		return 0, err
+	}
+	return resp[0].Elevation, nil
 }
 
 func extractStreetNameFromReverseGeocode(client *maps.Client, lat, lng float64) string {
@@ -100,7 +144,6 @@ func extractStreetNameFromReverseGeocode(client *maps.Client, lat, lng float64) 
 	if err != nil || len(resp) == 0 {
 		return ""
 	}
-	// prefer the first result's address component with type "route"
 	for _, comp := range resp[0].AddressComponents {
 		for _, t := range comp.Types {
 			if t == "route" {
@@ -108,7 +151,6 @@ func extractStreetNameFromReverseGeocode(client *maps.Client, lat, lng float64) 
 			}
 		}
 	}
-	// fallback to formatted address
 	return resp[0].FormattedAddress
 }
 
