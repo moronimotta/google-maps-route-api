@@ -45,7 +45,7 @@ func main() {
 		dr := &maps.DirectionsRequest{
 			Origin:      originStr,
 			Destination: req.Destination,
-			Mode:        maps.TravelModeBicycling,
+			Mode:        maps.TravelModeWalking, // Changed from Bicycling for better pedestrian path accuracy
 		}
 
 		routesResp, _, err := client.Directions(context.Background(), dr)
@@ -65,12 +65,41 @@ func main() {
 		for i, rt := range routesResp {
 			route := entities.Route{ID: i + 1}
 			points := []entities.Point{}
+			instructions := []entities.Instruction{}
+			
+			cumulativeDistance := 0
+			cumulativeTime := 0
 
 			for _, leg := range rt.Legs {
 				var lastDesc string
 				for _, step := range leg.Steps {
 					lat := step.StartLocation.Lat
 					lng := step.StartLocation.Lng
+
+					// Extract instruction from Google
+					htmlInst := step.HTMLInstructions
+					distanceMeters := step.Distance.Meters
+					durationSecs := int(step.Duration.Seconds())
+					
+					// Extract street name from HTML instruction
+					streetName := extractStreetNameFromHTML(htmlInst)
+					if streetName == "" {
+						streetName = stripHTML(htmlInst)
+					}
+					
+					// Build instruction object
+					instruction := entities.Instruction{
+						Instruction:     htmlInst,
+						DistanceMeters:  cumulativeDistance,
+						DurationSeconds: cumulativeTime,
+						Maneuver:        "", // Google Maps Go library doesn't expose maneuver field
+						StreetName:      streetName,
+						StartLocation:   entities.Coordinates{Lat: lat, Lng: lng},
+					}
+					instructions = append(instructions, instruction)
+					
+					cumulativeDistance += distanceMeters
+					cumulativeTime += durationSecs
 
 					// Prefer clean street name from reverse geocode
 					desc := extractStreetNameFromReverseGeocode(client, lat, lng)
@@ -98,13 +127,24 @@ func main() {
 					})
 				}
 
-				// Add final leg point
+				// Add final destination instruction
 				endLat := leg.EndLocation.Lat
 				endLng := leg.EndLocation.Lng
 				endDesc := extractStreetNameFromReverseGeocode(client, endLat, endLng)
 				if endDesc == "" {
 					endDesc = "Destination"
 				}
+				
+				instructions = append(instructions, entities.Instruction{
+					Instruction:     "Arrive at " + endDesc,
+					DistanceMeters:  cumulativeDistance,
+					DurationSeconds: cumulativeTime,
+					Maneuver:        "arrive",
+					StreetName:      endDesc,
+					StartLocation:   entities.Coordinates{Lat: endLat, Lng: endLng},
+				})
+				
+				// Add final leg point
 				elev, err := getElevation(client, endLat, endLng)
 				if err != nil {
 					elev = 0
@@ -135,6 +175,7 @@ func main() {
 			}
 
 			route.Points = simplified
+			route.Instructions = instructions
 			out.Routes = append(out.Routes, route)
 		}
 
@@ -212,6 +253,37 @@ func stripHTML(s string) string {
 		}
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// extractStreetNameFromHTML parses street name from Google HTML instructions
+// e.g., "Turn <b>left</b> onto <b>Market St</b>" -> "Market St"
+func extractStreetNameFromHTML(html string) string {
+	// Look for text in <b> tags that comes after "onto" or "on"
+	lower := strings.ToLower(html)
+	
+	if idx := strings.Index(lower, " onto "); idx >= 0 {
+		after := html[idx+6:]
+		// Find first <b>...</b> after "onto"
+		if start := strings.Index(after, "<b>"); start >= 0 {
+			after = after[start+3:]
+			if end := strings.Index(after, "</b>"); end >= 0 {
+				return strings.TrimSpace(after[:end])
+			}
+		}
+	}
+	
+	if idx := strings.Index(lower, " on "); idx >= 0 {
+		after := html[idx+4:]
+		if start := strings.Index(after, "<b>"); start >= 0 {
+			after = after[start+3:]
+			if end := strings.Index(after, "</b>"); end >= 0 {
+				return strings.TrimSpace(after[:end])
+			}
+		}
+	}
+	
+	// Fallback: strip all HTML and return
+	return stripHTML(html)
 }
 
 // simplifyRoute removes points that are too close together (< minDist meters)
